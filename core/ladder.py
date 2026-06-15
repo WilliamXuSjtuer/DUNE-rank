@@ -222,6 +222,42 @@ class Ladder:
         # 这里若要绝对置顶, 取消注释下一行:
         # else: winner.order_seq = -1
 
+    # ---------- 管理员手动调整 ----------
+
+    def set_player_tier(self, pid: str, name: str, tier: int) -> dict:
+        """管理员手动设置玩家 T 位。返回实际落位, 因无悬空层可能被压缩。"""
+        if tier < 1:
+            raise ValueError("tier must be >= 1")
+        player = self._ensure_player(pid, name)
+        before = player.tier if player.on_board else None
+        player.on_board = True
+        player.tier = tier
+        player.order_seq = self._next_seq()
+        self._compact()
+        return {"from": before, "to": player.tier}
+
+    def remove_player_from_board(self, pid: str) -> dict:
+        """管理员手动把玩家移出 T 榜, 保留玩家注册信息。"""
+        player = self.players.get(pid)
+        if not player or not player.on_board:
+            return {"removed": False, "from": None}
+        before = player.tier
+        player.on_board = False
+        player.tier = 0
+        player.order_seq = 0
+        self._compact()
+        return {"removed": True, "from": before}
+
+    def clear_board(self) -> dict:
+        """管理员清空 T 榜。玩家注册信息保留, 当日四人计数也重置。"""
+        removed = sum(1 for p in self.players.values() if p.on_board)
+        for player in self.players.values():
+            player.on_board = False
+            player.tier = 0
+            player.order_seq = 0
+        self._daily_counts = {}
+        return {"removed": removed}
+
     # ---------- 结算(规则7) ----------
 
     def settle(self) -> dict:

@@ -32,6 +32,7 @@ import os
 import re
 import asyncio
 import logging
+import json
 
 import aiohttp
 import botpy
@@ -44,8 +45,11 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dune_bot")
 
 AT_PATTERN = re.compile(r"<@!?\d+>")
-ADMINS = set(filter(None, os.environ.get("DUNE_ADMINS", "").split(",")))
 DATA_DIR = os.environ.get("DUNE_DATA_DIR", os.path.join(os.getcwd(), "data"))
+ENV_ADMINS = set(filter(None, os.environ.get("DUNE_ADMINS", "").split(",")))
+ADMIN_PASSWORD = "1552978853"
+ADMIN_UNLOCK_COMMAND = "DUNETTTT"
+ADMINS_PATH = os.path.join(DATA_DIR, "admins.json")
 
 HELP_TEXT = (
     "沙丘终局 T 榜机器人指令:\n"
@@ -55,8 +59,35 @@ HELP_TEXT = (
     "• 榜单 / 查榜 → 查看当前 T 榜\n"
     "• 明细 [n] → 查看最近 n 局对局明细(默认3)\n"
     "• 帮助 → 显示本说明\n"
-    "管理员指令: 结算 / 合并 <保留名> <并入名>"
+    "管理员指令: 结算 / 合并 <保留名> <并入名> / 设置T <玩家名> <T级|榜外> / 清空T榜"
 )
+
+
+def _load_file_admins() -> set[str]:
+    try:
+        with open(ADMINS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+    if isinstance(data, list):
+        return {str(x) for x in data if str(x)}
+    return {str(x) for x in data.get("admins", []) if str(x)}
+
+
+def _save_file_admins(admins: set[str]) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(ADMINS_PATH, "w", encoding="utf-8") as f:
+        json.dump({"admins": sorted(admins)}, f, ensure_ascii=False, indent=2)
+
+
+def _all_admins() -> set[str]:
+    return ENV_ADMINS | _load_file_admins()
+
+
+def _add_file_admin(user_id: str) -> None:
+    admins = _load_file_admins()
+    admins.add(user_id)
+    _save_file_admins(admins)
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -78,7 +109,7 @@ def _author_id(message) -> str:
 
 
 def _is_admin(message: Message) -> bool:
-    return _author_id(message) in ADMINS
+    return _author_id(message) in _all_admins()
 
 
 def _is_from_bot(message) -> bool:
@@ -107,7 +138,8 @@ def _image_attachments(message) -> list:
 
 def _looks_like_command(content: str) -> bool:
     if content in (
-        "帮助", "help", "菜单", "榜单", "查榜", "排行", "t榜", "T榜", "结算"
+        "帮助", "help", "菜单", "榜单", "查榜", "排行", "t榜", "T榜", "结算",
+        "清空T榜", "清空榜单", ADMIN_UNLOCK_COMMAND
     ):
         return True
     return any(re.match(pattern, content) for pattern in (
@@ -115,6 +147,7 @@ def _looks_like_command(content: str) -> bool:
         r"^确认\s+[0-9a-fA-F]{4,8}$",
         r"^取消\s+[0-9a-fA-F]{4,8}$",
         r"^合并\s+\S+\s+\S+$",
+        r"^(?:设置T|改T)\s+.+\s+(?:T?\d+|榜外|移出)$",
     ))
 
 
@@ -143,6 +176,7 @@ class DuneBot(botpy.Client):
             vision = VisionRecognizer()
         # require_confirm=True: 识别后需人工确认, 防止误识别污染榜单(规则6)
         self.service = DuneService(DATA_DIR, vision=vision, require_confirm=True)
+        self.admin_auth_waiting: set[str] = set()
 
     async def on_ready(self):
         log.info("机器人 %s 已上线", self.robot.name)
@@ -172,12 +206,13 @@ class DuneBot(botpy.Client):
         if _is_from_bot(message):
             return
 
+        author_id = _author_id(message)
         content = _clean_content(message)
         image_atts = _image_attachments(message)
         log.info(
             "收到 %s 消息 author=%s content=%r attachments=%s images=%s",
             source,
-            _author_id(message),
+            author_id,
             content,
             len(getattr(message, "attachments", None) or []),
             len(image_atts),
@@ -188,7 +223,8 @@ class DuneBot(botpy.Client):
             await self._handle_image(message, image_atts[0])
             return
 
-        if not reply_unknown and not _looks_like_command(content):
+        if (not reply_unknown and author_id not in self.admin_auth_waiting
+                and not _looks_like_command(content)):
             return
 
         # 2) 文本指令
@@ -226,6 +262,21 @@ class DuneBot(botpy.Client):
         content: str,
         reply_unknown: bool = True,
     ) -> None:
+        author_id = _author_id(message)
+        if author_id in self.admin_auth_waiting:
+            self.admin_auth_waiting.discard(author_id)
+            if content == ADMIN_PASSWORD:
+                _add_file_admin(author_id)
+                await self._reply_text(message, "管理员验证成功, 当前账号已添加为管理员。")
+            else:
+                await self._reply_text(message, "管理员密码错误, 验证已取消。")
+            return
+
+        if content == ADMIN_UNLOCK_COMMAND:
+            self.admin_auth_waiting.add(author_id)
+            await self._reply_text(message, "请输入管理员密码")
+            return
+
         if not content or content in ("帮助", "help", "菜单"):
             await self._reply_text(message, HELP_TEXT)
             return
@@ -257,6 +308,29 @@ class DuneBot(botpy.Client):
                 await self._reply_text(message, "只有管理员可以结算")
                 return
             res = self.service.settle()
+            await self._reply_text(message, res["msg"])
+            return
+
+        if content in ("清空T榜", "清空榜单"):
+            if not _is_admin(message):
+                await self._reply_text(message, "只有管理员可以清空 T 榜")
+                return
+            res = self.service.admin_clear_board()
+            await self._reply_text(message, res["msg"])
+            return
+
+        m = re.match(r"^(?:设置T|改T)\s+(.+?)\s+(T?\d+|榜外|移出)$", content, re.IGNORECASE)
+        if m:
+            if not _is_admin(message):
+                await self._reply_text(message, "只有管理员可以修改 T 榜")
+                return
+            name = m.group(1).strip()
+            target = m.group(2).strip()
+            if target in ("榜外", "移出"):
+                res = self.service.admin_remove_from_board(name)
+            else:
+                tier = int(target[1:] if target.lower().startswith("t") else target)
+                res = self.service.admin_set_tier(name, tier)
             await self._reply_text(message, res["msg"])
             return
 

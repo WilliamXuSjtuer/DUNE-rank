@@ -14,6 +14,7 @@ fv = FakeVision([{"name":"阿杰","character":"哥尼·哈莱克","score":13,"sp
                  {"name":"小美","character":"穆阿迪布","score":10,"spice":None,"solari":None,"water":None,"troops":None,"rank":2},
                  {"name":"老王","character":None,"score":8,"spice":None,"solari":None,"water":None,"troops":None,"rank":3},
                  {"name":"阿强","character":None,"score":6,"spice":None,"solari":None,"water":None,"troops":None,"rank":4}])
+stale_svc = DuneService(tmp, vision=fv, require_confirm=True)
 svc = DuneService(tmp, vision=fv, require_confirm=True)
 
 # 提交截图 -> 待确认
@@ -22,11 +23,11 @@ print("=== 识别 ==="); print(r1["msg"]); print()
 token = r1["token"]
 
 # 确认入榜
-r2 = svc.confirm(token)
+r2 = stale_svc.confirm(token)
 print("=== 确认 ==="); print(r2["msg"]); print()
 
 # 查榜
-print("=== 榜单 ==="); print(svc.board_text()); print()
+print("=== 榜单 ==="); print(stale_svc.board_text()); print()
 
 # 重启后数据仍在
 svc2 = DuneService(tmp, vision=fv, require_confirm=True)

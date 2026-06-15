@@ -77,9 +77,19 @@ class DuneService:
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
+    def _refresh_pending(self) -> None:
+        """Reload pending confirmations so parallel bot instances do not use stale memory."""
+        self.pending = self._load_pending()
+
     def _save_pending(self) -> None:
         with open(self.pending_path, "w", encoding="utf-8") as f:
             json.dump(self.pending, f, ensure_ascii=False, indent=2)
+
+    def _pending_missing_msg(self, token: str) -> str:
+        if not self.pending:
+            return f"找不到编号 {token}。当前没有待确认记录。"
+        tokens = "、".join(sorted(self.pending.keys()))
+        return f"找不到编号 {token}。当前待确认编号: {tokens}"
 
     def _log_history(self, entry: dict) -> None:
         entry["ts"] = time.time()
@@ -111,25 +121,30 @@ class DuneService:
         if not self.require_confirm:
             return self._commit(record)
 
+        self._refresh_pending()
         self.pending[token] = record
         self._save_pending()
         return {"ok": True, "msg": _render_recognition(record), "token": token}
 
     # ---------- 确认入榜 ----------
     def confirm(self, token: str) -> dict:
+        token = token.strip().lower()
+        self._refresh_pending()
         record = self.pending.get(token)
         if not record:
-            return {"ok": False, "msg": f"找不到编号 {token}"}
+            return {"ok": False, "msg": self._pending_missing_msg(token)}
         out = self._commit(record)
         self.pending.pop(token, None)
         self._save_pending()
         return out
 
     def cancel(self, token: str) -> dict:
+        token = token.strip().lower()
+        self._refresh_pending()
         if self.pending.pop(token, None):
             self._save_pending()
             return {"ok": True, "msg": f"已取消 {token}"}
-        return {"ok": False, "msg": f"找不到编号 {token}"}
+        return {"ok": False, "msg": self._pending_missing_msg(token)}
 
     def _commit(self, record: dict) -> dict:
         results = []
@@ -216,3 +231,56 @@ class DuneService:
         self.ladder.players.pop(drop, None)
         self._save_all()
         return {"ok": True, "msg": f"已将「{drop_name}」并入「{keep_name}」"}
+
+    def admin_set_tier(self, name: str, tier: int) -> dict:
+        name = name.strip()
+        if not name:
+            return {"ok": False, "msg": "玩家名不能为空"}
+        if not 1 <= tier <= 10:
+            return {"ok": False, "msg": "T级必须在 1-10 之间"}
+
+        pid = self.registry.resolve(name)
+        changed = self.ladder.set_player_tier(pid, name, tier)
+        self._log_history({
+            "type": "admin_set_tier",
+            "name": name,
+            "pid": pid,
+            "from": changed["from"],
+            "to": changed["to"],
+            "requested": tier,
+        })
+        self._save_all()
+
+        frm = "榜外" if changed["from"] is None else f"T{changed['from']}"
+        msg = f"已设置「{name}」: {frm} → T{changed['to']}"
+        if changed["to"] != tier:
+            msg += f"\n提示: 因规则要求无悬空层, 请求的 T{tier} 已压缩为 T{changed['to']}。"
+        return {"ok": True, "msg": msg}
+
+    def admin_remove_from_board(self, name: str) -> dict:
+        name = name.strip()
+        if not name:
+            return {"ok": False, "msg": "玩家名不能为空"}
+        pid = self.registry.resolve(name, auto_create=False)
+        if not pid:
+            return {"ok": False, "msg": f"找不到玩家「{name}」"}
+
+        changed = self.ladder.remove_player_from_board(pid)
+        if not changed["removed"]:
+            return {"ok": False, "msg": f"「{name}」不在 T 榜上"}
+
+        self._log_history({
+            "type": "admin_remove_from_board",
+            "name": name,
+            "pid": pid,
+            "from": changed["from"],
+        })
+        self._save_all()
+        return {"ok": True, "msg": f"已将「{name}」从 T{changed['from']} 移出 T 榜"}
+
+    def admin_clear_board(self) -> dict:
+        out = self.ladder.clear_board()
+        self._log_history({"type": "admin_clear_board", "removed": out["removed"]})
+        self._save_all()
+        return {"ok": True,
+                "msg": f"已清空 T 榜, 共移出 {out['removed']} 人。玩家注册表和历史明细已保留。"}
