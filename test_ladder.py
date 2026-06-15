@@ -94,33 +94,34 @@ print("\n✅ 全部规则测试通过")
 # --- 新规则: 不在榜玩家首胜才进榜 ---
 print("\n--- 新规则: 首胜进榜 ---")
 ladN = Ladder()
-# A 已在榜 T1; B C D 都是新人(未进榜)
-ladN._ensure_player("A","A"); ladN.players["A"].tier=1; ladN.players["A"].on_board=True
-for n in ["B","C","D"]:
-    ladN._ensure_player(n,n)  # 不进榜
-assert all(not ladN.players[n].on_board for n in ["B","C","D"])
+# A B C D 分别只赢过榜外玩家, 都应并列进入 T1, 不应依次变成 T1/T2/T3/T4。
+for idx, winner in enumerate(["A","B","C","D"], start=1):
+    results = [(winner,winner,1)]
+    results += [(f"{winner}_N{i}",f"{winner}_N{i}",i + 2) for i in range(3)]
+    out = ladN.apply_match(results, on_date=date(2025,6,idx))
+    assert out["entered"]==winner, out
+    assert ladN.players[winner].on_board and ladN.players[winner].tier==1, (winner, ladN.players[winner].tier)
+
 b0 = names(ladN.board())
-assert b0.get(1)==["A"] and len([t for t in b0])==1, b0
-print("初始: 只有 A 在榜 ->", ladN.render_board().replace("\n"," | "))
+assert b0.get(1)==["A","B","C","D"] and set(b0.keys())=={1}, b0
+print("A/B/C/D 首胜入榜均为 T1 ->", ladN.render_board().replace("\n"," | "))
 
-# 第一局: C 赢(C 是新人) -> C 首胜进榜, 垫底
-r = ladN.apply_match([("C","C",1),("A","A",2),("B","B",3),("D","D",4)], on_date=date(2025,6,1))
-assert r["entered"]=="C", r
-assert ladN.players["C"].on_board and ladN.players["C"].tier==2, (ladN.players["C"].on_board, ladN.players["C"].tier)
-assert not ladN.players["B"].on_board and not ladN.players["D"].on_board, "B D 参与但没赢, 不进榜"
-print("C 首胜进榜 ->", ladN.render_board().replace("\n"," | "))
+# A B C D 全 T1 对局, A 胜: A 留 T1, B C D 进入 T2。
+r = ladN.apply_match([("A","A",1),("B","B",2),("C","C",3),("D","D",4)], on_date=date(2025,6,10))
+assert r["recorded"], r
+assert ladN.players["A"].tier==1, ladN.players["A"].tier
+assert all(ladN.players[n].tier==2 for n in ["B","C","D"]), [ladN.players[n].tier for n in "BCD"]
+print("全 T1 对局后 ->", ladN.render_board().replace("\n"," | "))
 
-# 第二局: A 赢(A 在榜且是本局唯一在榜 -> 也是最低级) -> A 升级? A 已 T1 升不了
-# 换: B 赢 -> B 首胜进榜
-r2 = ladN.apply_match([("B","B",1),("A","A",2),("C","C",3),("D","D",4)], on_date=date(2025,6,2))
-assert r2["entered"]=="B"
-assert ladN.players["B"].on_board
-assert not ladN.players["D"].on_board, "D 始终没赢, 仍在榜外"
-print("B 首胜进榜 ->", ladN.render_board().replace("\n"," | "))
-print("D 仍在榜外:", not ladN.players["D"].on_board)
+# 此时已有 T2, 新人 E 首胜应进入当前最低级 T2, 不新开 T3。
+r2 = ladN.apply_match([("E","E",1),("E_N0","E_N0",2),("E_N1","E_N1",3),("E_N2","E_N2",4)], on_date=date(2025,6,11))
+assert r2["entered"]=="E", r2
+assert ladN.players["E"].on_board and ladN.players["E"].tier==2, ladN.players["E"].tier
+assert names(ladN.board())[2]==["B","C","D","E"], names(ladN.board())
+print("E 首胜入榜进入 T2 ->", ladN.render_board().replace("\n"," | "))
 
 # 验证: 在榜玩家的升降级不受榜外玩家影响
-# 现在榜: A(T1), C(T2), B(T3 或并列)... C 再赢且 C 是在榜最低 -> C 升级
+# 单独布置: A(T1), C(T2), 两个榜外新人。C 再赢且 C 是在榜最低 -> C 升级。
 ladM = Ladder()
 ladM._ensure_player("A","A"); ladM.players["A"].tier=1; ladM.players["A"].on_board=True
 ladM._ensure_player("C","C"); ladM.players["C"].tier=2; ladM.players["C"].on_board=True

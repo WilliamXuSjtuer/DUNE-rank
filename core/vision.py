@@ -39,6 +39,10 @@ from typing import Optional
 
 MINIMAX_DEFAULT_BASE_URL = "https://api.minimax.io/v1"
 
+
+def _clean_env_value(value: Optional[str]) -> str:
+    return (value or "").strip().strip("'\"")
+
 SYSTEM_PROMPT = """你是《沙丘:帝国(Dune: Imperium)》对局截图识别助手。
 游戏每局 4 名玩家。你要先判断截图类型, 再提取信息。只输出 JSON, 不要任何解释、不要 Markdown 代码块。
 
@@ -101,12 +105,15 @@ class VisionRecognizer:
                  base_url: Optional[str] = None,
                  timeout: int = 60,
                  max_tokens: int = 1500) -> None:
-        self.api_key = api_key or os.environ.get("MINIMAX_API_KEY")
+        self.api_key = _clean_env_value(api_key or os.environ.get("MINIMAX_API_KEY"))
         if not self.api_key:
             raise RuntimeError("请设置环境变量 MINIMAX_API_KEY")
-        self.model = model or os.environ.get("MINIMAX_MODEL", "MiniMax-M3")
+        self.model = _clean_env_value(
+            model or os.environ.get("MINIMAX_MODEL") or "MiniMax-M3"
+        )
         self.base_url = (
-            base_url or os.environ.get("MINIMAX_BASE_URL") or MINIMAX_DEFAULT_BASE_URL
+            _clean_env_value(base_url or os.environ.get("MINIMAX_BASE_URL"))
+            or MINIMAX_DEFAULT_BASE_URL
         ).rstrip("/")
         self.timeout = timeout
         self.max_tokens = max_tokens
@@ -178,6 +185,16 @@ class VisionRecognizer:
                 body = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
+            if e.code == 401:
+                return {
+                    "ok": False,
+                    "error": (
+                        "MiniMax 鉴权失败: API Key 无效或服务未加载最新 "
+                        "MINIMAX_API_KEY。请检查 Key 是否来自 MiniMax 控制台、"
+                        "是否复制完整, 并重启机器人服务。"
+                    ),
+                    "raw": body,
+                }
             return {"ok": False,
                     "error": f"MiniMax 调用失败 HTTP {e.code}: {body[:500]}",
                     "raw": body}

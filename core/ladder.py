@@ -3,6 +3,7 @@
 ==================
 
 规则:
+0. 不在榜玩家首胜后进入当前最低 T 级垫底; 不因新人入榜自动新开下一层
 1. 普通对局: 胜者若为本局四人中 T 级最低(可并列), 升一级
 2. 某一级 0 人时, 下一级整体顶上, 无悬空层
 3. 全 T1 对局: 胜者保留 T1, 本局其余 3 人降到 T2, 原 T2->T3, 依次后推一级
@@ -95,7 +96,7 @@ class Ladder:
 
     def _enter_board(self, player: Player) -> None:
         """新规则: 玩家首胜后进入 T 榜, 落在当前最低级垫底。"""
-        bottom = self._max_tier() + 1 if any(p.on_board for p in self.players.values()) else 1
+        bottom = self._max_tier() or 1
         player.on_board = True
         player.tier = bottom
         player.order_seq = self._next_seq()
@@ -155,10 +156,10 @@ class Ladder:
         entered = None   # 本局是否有新人首胜进榜
 
         if not winner.on_board:
-            # 新规则: 胜者尚未进榜 -> 首胜进榜(落最低级垫底)
+            # 新规则: 胜者尚未进榜 -> 首胜进当前最低 T 级垫底, 不新开一层
             self._enter_board(winner)
             entered = winner.name
-            rule = "新规则: 胜者首胜, 进入 T 榜垫底"
+            rule = "新规则: 胜者首胜, 进入当前最低 T 级垫底"
         else:
             # 升降级只看本局"在榜"玩家的 T 级
             board_tiers = [p.tier for p in match_players if p.on_board]
