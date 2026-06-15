@@ -1,6 +1,6 @@
 # 沙丘终局 T 榜 QQ 机器人
 
-@机器人并发对局结算截图 → 云端视觉模型识别四人名次 → 按 T 榜规则自动升降级 → 持久化记录。
+频道/QQ群 @机器人并发对局结算截图 → MiniMax-M3 识别四人名次 → 按 T 榜规则自动升降级 → 持久化记录。好友/C2C/私信可直接发送文本指令。
 
 ## 目录结构
 
@@ -31,9 +31,12 @@ pip install -r requirements.txt
 |------|------|
 | `QQ_APPID` | 机器人 AppID(QQ 开放平台) |
 | `QQ_SECRET` | 机器人 AppSecret |
-| `ANTHROPIC_API_KEY` | 视觉模型密钥 |
+| `MINIMAX_API_KEY` | MiniMax API Key |
+| `MINIMAX_MODEL` | MiniMax 模型名,默认 `MiniMax-M3` |
+| `MINIMAX_BASE_URL` | MiniMax OpenAI 兼容地址,默认 `https://api.minimax.io/v1` |
 | `DUNE_ADMINS` | 管理员 user id,逗号分隔 |
 | `DUNE_DATA_DIR` | 数据目录,默认 `./data` |
+| `DUNE_ENABLE_GUILD_MESSAGES` | 私域频道机器人监听频道内全部消息,公域机器人不要开启;默认只监听 @ |
 
 ## 运行
 
@@ -63,7 +66,7 @@ python -m bot.qqbot
 
 | 操作 | 说明 |
 |------|------|
-| @机器人 + 截图 | 识别盘面,生成待确认记录(含角色/分数/资源) |
+| 频道/QQ群 @机器人 + 截图 | 识别盘面,生成待确认记录(含角色/分数/资源) |
 | `确认 <编号>` | 确认识别结果入榜 |
 | `取消 <编号>` | 丢弃识别结果 |
 | `榜单` / `查榜` | 查看当前 T 榜 |
@@ -71,6 +74,23 @@ python -m bot.qqbot
 | `结算` (管理员) | 只保留 T1–T10 |
 | `合并 <保留名> <并入名>` (管理员) | 合并同一玩家的不同昵称 |
 | `帮助` | 指令说明 |
+
+## 没有回应时先看日志
+
+重启后日志会显示已启用的 intents,正常至少应包含:
+
+```text
+已启用 intents: public_guild_messages, public_messages, direct_message
+```
+
+发送消息后如果日志里没有 `收到 ... 消息`,说明事件没有从 QQ 开放平台推到服务:
+
+- QQ频道: 必须在频道里真正 @ 机器人;当前默认监听 `on_at_message_create`。
+- QQ群: 需要使用群里 @ 机器人的方式触发 `on_group_at_message_create`。
+- 好友/C2C: 直接发文本会触发 `on_c2c_message_create`。
+- 私域频道如果想不 @ 也响应命令,设置 `DUNE_ENABLE_GUILD_MESSAGES=1`;公域机器人不要开启。
+
+如果日志里有 `收到 ... 消息` 但没有回复,继续看紧随其后的 `发送回复失败`、`图片下载失败` 或 `未配置视觉模型` 日志。
 
 ## T 榜规则实现说明
 
@@ -91,7 +111,12 @@ python -m bot.qqbot
 
 ## 提高识别准确率
 
-`core/vision.py` 里的 `SYSTEM_PROMPT` 是识别准确率的关键。请根据你游戏结算截图的**实际版式**(名次怎么显示、昵称在哪、有无积分)调整提示词,并可换用更强的视觉模型(把 `model` 改成 `claude-opus-4-8`)。
+`core/vision.py` 里的 `SYSTEM_PROMPT` 是识别准确率的关键。请根据你游戏结算截图的**实际版式**(名次怎么显示、昵称在哪、有无积分)调整提示词。默认调用 MiniMax OpenAI-compatible Chat Completions:
+
+```bash
+export MINIMAX_API_KEY=你的MiniMaxKey
+export MINIMAX_MODEL=MiniMax-M3
+```
 
 ## 测试
 

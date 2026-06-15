@@ -33,13 +33,11 @@ import base64
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 from typing import Optional
 
-try:
-    from anthropic import Anthropic
-except ImportError:
-    Anthropic = None
-
+MINIMAX_DEFAULT_BASE_URL = "https://api.minimax.io/v1"
 
 SYSTEM_PROMPT = """你是《沙丘:帝国(Dune: Imperium)》对局截图识别助手。
 游戏每局 4 名玩家。你要先判断截图类型, 再提取信息。只输出 JSON, 不要任何解释、不要 Markdown 代码块。
@@ -99,11 +97,19 @@ def resolve_ranks_by_tiebreak(players: list[dict]) -> list[dict]:
 
 class VisionRecognizer:
     def __init__(self, api_key: Optional[str] = None,
-                 model: str = "claude-opus-4-8") -> None:
-        if Anthropic is None:
-            raise RuntimeError("请先 pip install anthropic")
-        self.client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
-        self.model = model
+                 model: Optional[str] = None,
+                 base_url: Optional[str] = None,
+                 timeout: int = 60,
+                 max_tokens: int = 1500) -> None:
+        self.api_key = api_key or os.environ.get("MINIMAX_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("请设置环境变量 MINIMAX_API_KEY")
+        self.model = model or os.environ.get("MINIMAX_MODEL", "MiniMax-M3")
+        self.base_url = (
+            base_url or os.environ.get("MINIMAX_BASE_URL") or MINIMAX_DEFAULT_BASE_URL
+        ).rstrip("/")
+        self.timeout = timeout
+        self.max_tokens = max_tokens
 
     @staticmethod
     def _media_type(image_bytes: bytes) -> str:
@@ -117,41 +123,128 @@ class VisionRecognizer:
             return "image/webp"
         return "image/jpeg"
 
+    def _chat_completions_url(self) -> str:
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        return f"{self.base_url}/chat/completions"
+
+    @staticmethod
+    def _extract_text(content) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts).strip()
+        return ""
+
     def recognize(self, image_bytes: bytes) -> dict:
         b64 = base64.standard_b64encode(image_bytes).decode("ascii")
         media_type = self._media_type(image_bytes)
-        try:
-            msg = self.client.messages.create(
-                model=self.model,
-                max_tokens=1500,
-                system=SYSTEM_PROMPT,
-                messages=[{
+        payload = {
+            "model": self.model,
+            "max_completion_tokens": self.max_tokens,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
                     "role": "user",
                     "content": [
-                        {"type": "image", "source": {
-                            "type": "base64", "media_type": media_type, "data": b64}},
                         {"type": "text", "text": USER_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{b64}",
+                            },
+                        },
                     ],
-                }],
-            )
+                },
+            ],
+        }
+        req = urllib.request.Request(
+            self._chat_completions_url(),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            return {"ok": False,
+                    "error": f"MiniMax 调用失败 HTTP {e.code}: {body[:500]}",
+                    "raw": body}
         except Exception as e:
-            return {"ok": False, "error": f"视觉模型调用失败: {e}", "raw": ""}
+            return {"ok": False, "error": f"MiniMax 调用失败: {e}", "raw": ""}
 
-        text = "".join(
-            block.text for block in msg.content if getattr(block, "type", "") == "text"
-        ).strip()
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            return {"ok": False,
+                    "error": f"MiniMax 响应不是 JSON: {e}", "raw": body}
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return {"ok": False, "error": "MiniMax 响应缺少 choices", "raw": body}
+
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        text = self._extract_text(message.get("content"))
+        if not text:
+            return {"ok": False, "error": "MiniMax 响应缺少文本内容", "raw": body}
         return self._parse(text)
+
+    @staticmethod
+    def _json_object_candidates(text: str):
+        for start in range(len(text)):
+            if text[start] != "{":
+                continue
+            depth = 0
+            in_string = False
+            escaped = False
+            for pos in range(start, len(text)):
+                ch = text[pos]
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        yield text[start:pos + 1]
+                        break
 
     @staticmethod
     def _parse(text: str) -> dict:
         cleaned = re.sub(r"^```[a-zA-Z]*|```$", "", text.strip()).strip()
-        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not m:
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+        errors = []
+        for json_text in VisionRecognizer._json_object_candidates(cleaned):
+            try:
+                data = json.loads(json_text)
+                break
+            except json.JSONDecodeError as e:
+                errors.append(str(e))
+        else:
+            if errors:
+                return {"ok": False,
+                        "error": f"JSON 解析失败: {errors[-1]}", "raw": text}
             return {"ok": False, "error": "未返回 JSON", "raw": text}
-        try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError as e:
-            return {"ok": False, "error": f"JSON 解析失败: {e}", "raw": text}
 
         if "error" in data:
             return {"ok": False, "error": str(data["error"]), "raw": text}
